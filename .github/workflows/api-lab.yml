@@ -28,7 +28,7 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Deploy MySQL and test catalog APIs
+      - name: Deploy MySQL and test catalog, internal and sales APIs
         shell: bash
         run: |
           set -euo pipefail
@@ -61,4 +61,11 @@ jobs:
           done
           sed "s/IDENTIFIED BY RANDOM PASSWORD/IDENTIFIED BY '$TEST_PW'/g" SQL/MovieCDStore_security.sql | root_sql > /dev/null
           export DB_HOST=127.0.0.1 DB_PORT=3307 DB_NAME=MovieCDStore DB_USER=cd_viewer DB_PASSWORD="$TEST_PW"
+          API_SALES_PW="As1!$(openssl rand -hex 20)"
+          API_MANAGER_PW="Am1!$(openssl rand -hex 20)"
+          echo "::add-mask::$API_SALES_PW"
+          echo "::add-mask::$API_MANAGER_PW"
+          export DB_ADMIN_PASSWORD="$TEST_PW" DB_SALES_PASSWORD="$TEST_PW" DB_MANAGER_PASSWORD="$TEST_PW"
+          export API_SALES_PASSWORD="$API_SALES_PW" API_MANAGER_PASSWORD="$API_MANAGER_PW" API_SALES_EMPLOYEE_ID=90102
           python app/test_api_catalog.py
+          python app/test_api_operations.py
