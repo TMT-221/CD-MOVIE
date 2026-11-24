@@ -1,1 +1,119 @@
+name: MovieCDStore - MySQL Lab Tests
 
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SQL/**'
+      - '.github/workflows/mysql-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mysql-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Start MySQL 8.4 and run SQL tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT_PW="Aa1!$(openssl rand -hex 20)"
+          TEST_PW="Aa2!$(openssl rand -hex 20)"
+          echo "::add-mask::$ROOT_PW"
+          echo "::add-mask::$TEST_PW"
+          export ROOT_PW TEST_PW
+          docker run -d --name cd-mysql -e MYSQL_ROOT_PASSWORD="$ROOT_PW" mysql:8.4 --skip-name-resolve
+          trap 'docker rm -f cd-mysql >/dev/null 2>&1 || true' EXIT
+
+          root_sql() {
+            docker exec -i -e MYSQL_PWD="$ROOT_PW" cd-mysql mysql -uroot --default-character-set=utf8mb4 "$@"
+          }
+
+          # Wait for the final server, not the socket-only initialization server.
+          ready=0
+          for i in {1..90}; do
+            if docker exec cd-mysql mysqladmin -h127.0.0.1 --protocol=TCP ping --silent >/dev/null 2>&1 && root_sql -Nse 'SELECT 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1 || { echo 'MySQL did not become ready'; exit 1; }
+          root_sql -e 'SELECT VERSION(), @@port;'
+
+          for part in schema indexes routines routines_demo sample_data queries; do
+            echo "::group::MovieCDStore_${part}.sql"
+            root_sql < "SQL/MovieCDStore_${part}.sql"
+            echo '::endgroup::'
+          done
+
+          # Check demo outputs and the number of actual base tables.
+          test "$(root_sql -Nse "SELECT CONCAT(TrangThai, ':', fn_TinhTongTienHoaDon(90301)) FROM MovieCDStore.HOA_DON WHERE MaHD=90301" MovieCDStore)" = 'HoanTat:100000.00'
+          test "$(root_sql -Nse 'SELECT SoLuongTon FROM DIA_CD WHERE MaDia=90203' MovieCDStore)" = '3'
+          test "$(root_sql -Nse "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='MovieCDStore' AND TABLE_TYPE='BASE TABLE'")" = '12'
+
+          # Use ephemeral CI passwords without editing or exposing the original script.
+          sed "s/IDENTIFIED BY RANDOM PASSWORD/IDENTIFIED BY '$TEST_PW'/g" SQL/MovieCDStore_security.sql | root_sql
+
+          # Read the 21 existing test cases and use the correct role for each.
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+
+          source = pathlib.Path('SQL/MovieCDStore_security_tests.sql').read_text(encoding='utf-8-sig')
+          tests = []
+          case = None
+          for line in source.splitlines():
+              match = re.match(r'-- (T\d{2})\s+.*', line)
+              if match:
+                  if case is not None:
+                      raise ValueError(f'Missing SQL for {case[0]}')
+                  case = [match.group(1), []]
+              elif case is not None and line.strip() and not line.lstrip().startswith('--'):
+                  case[1].append(line)
+                  if line.rstrip().endswith(';'):
+                      tests.append((case[0], '\n'.join(case[1])))
+                      case = None
+          assert case is None and [t[0] for t in tests] == [f'T{i:02d}' for i in range(1, 22)], 'Expected T01-T21'
+
+          denied = {3: {1142}, 8: {1142, 1143}, 9: {1142}, 13: {1644},
+                    14: {1142}, 15: {1142}, 16: {1370}, 19: {1142, 1143},
+                    20: {1142}, 21: {1370}}
+
+          def run(user, sql):
+              return subprocess.run(
+                  ['docker', 'exec', '-i', '-e', 'MYSQL_PWD=' + os.environ['TEST_PW'],
+                   'cd-mysql', 'mysql', '--protocol=TCP', '-h127.0.0.1', '-u'+user,
+                   '--default-character-set=utf8mb4', '--batch', 'MovieCDStore'],
+                  input=sql, capture_output=True, text=True)
+
+          passed = 0
+          for code, sql in tests:
+              i = int(code[1:])
+              user = 'cd_admin' if i <= 3 else 'cd_manager' if i <= 9 else 'cd_sales' if i <= 16 else 'cd_viewer'
+              result = run(user, sql)
+              expected = denied.get(i)
+              error = re.search(r'ERROR (\d+)', result.stderr)
+              if expected is None:
+                  ok = result.returncode == 0
+              else:
+                  ok = result.returncode != 0 and error is not None and int(error.group(1)) in expected
+              if i == 13:
+                  ok = ok and 'Nhan vien khong ton tai hoac khong dang lam' in result.stderr
+              print(f'{code} [{user}] {"PASS" if ok else "FAIL"}', flush=True)
+              if result.stdout:
+                  print(result.stdout, end='')
+              if result.stderr:
+                  print(result.stderr, end='')
+              passed += int(ok)
+          print(f'Security tests: {passed}/21 PASS')
+          if passed != 21:
+              raise SystemExit(1)
+          PY
