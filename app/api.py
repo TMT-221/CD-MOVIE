@@ -315,3 +315,12 @@ def revenue(start_date: date, end_date: date, role: Annotated[str, Depends(requi
         raise HTTPException(422, "Invalid date range")
     rows = sales_data.revenue_report(role_password(role), start_date, end_date)
     return [dict(zip(("NgayLap", "SoHoaDon", "DoanhThu"), row)) for row in rows]
+
+
+# Optional presentation interface for Lab 02; the existing API stays unchanged.
+@app.get('/ui', include_in_schema=False)
+def lab_interface():
+    from pathlib import Path as FilePath
+    from fastapi.responses import FileResponse
+    return FileResponse(FilePath(__file__).with_name('ui.html'),
+                        media_type='text/html', headers={'Cache-Control': 'no-store'})
