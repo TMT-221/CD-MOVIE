@@ -1,0 +1,64 @@
+name: MovieCDStore - Python Lab Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SQL/**'
+      - 'app/**'
+      - 'requirements.txt'
+      - '.github/workflows/python-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Deploy MySQL and test Python connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT_PW="Aa1!$(openssl rand -hex 20)"
+          TEST_PW="Aa2!$(openssl rand -hex 20)"
+          echo "::add-mask::$ROOT_PW"
+          echo "::add-mask::$TEST_PW"
+          # Linux host networking keeps the TCP client at 127.0.0.1,
+          # matching the host in the existing security script.
+          docker run -d --name cd-python-mysql --network host \
+            -e MYSQL_ROOT_PASSWORD="$ROOT_PW" mysql:8.4 \
+            --port=3307 --bind-address=127.0.0.1 --skip-name-resolve
+          trap 'docker rm -f cd-python-mysql >/dev/null 2>&1 || true' EXIT
+          root_sql() {
+            docker exec -i -e MYSQL_PWD="$ROOT_PW" cd-python-mysql \
+              mysql -uroot --default-character-set=utf8mb4 "$@"
+          }
+          ready=0
+          for i in {1..90}; do
+            if docker exec cd-python-mysql mysqladmin -h127.0.0.1 -P3307 --protocol=TCP ping --silent >/dev/null 2>&1 && root_sql -Nse 'SELECT 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1 || { echo 'MySQL did not become ready'; exit 1; }
+          for part in schema indexes routines routines_demo sample_data; do
+            echo "Deploying MovieCDStore_${part}.sql"
+            root_sql < "SQL/MovieCDStore_${part}.sql" > /dev/null
+          done
+          sed "s/IDENTIFIED BY RANDOM PASSWORD/IDENTIFIED BY '$TEST_PW'/g" SQL/MovieCDStore_security.sql | root_sql > /dev/null
+          export DB_HOST=127.0.0.1 DB_PORT=3307 DB_NAME=MovieCDStore DB_USER=cd_viewer DB_PASSWORD="$TEST_PW"
+          python app/test_connection.py
