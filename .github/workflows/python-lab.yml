@@ -28,7 +28,7 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Deploy MySQL and test Python connection, reads and writes
+      - name: Deploy MySQL and test Python connection, reads, writes and sales
         shell: bash
         run: |
           set -euo pipefail
@@ -66,3 +66,4 @@ jobs:
           DB_USER=cd_sales python app/read_data.py customers --verify-fixture
           DB_USER=cd_manager python app/read_data.py reports --verify-fixture
           DB_ADMIN_PASSWORD="$TEST_PW" DB_MANAGER_PASSWORD="$TEST_PW" DB_VIEWER_PASSWORD="$TEST_PW" python app/write_data.py
+          DB_ADMIN_PASSWORD="$TEST_PW" DB_SALES_PASSWORD="$TEST_PW" DB_MANAGER_PASSWORD="$TEST_PW" python app/sales_data.py
